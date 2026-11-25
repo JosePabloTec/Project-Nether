@@ -25,13 +25,13 @@
 // ============================================================================
 // DEFINICIÓN DE PINES DE LOS SHIFT REGISTERS (DIP-40)
 // ============================================================================
-#define SR1_DATA  LATBbits.LATB4  // Pin 37 -> AB Shift Register 1 (LEDs 1-6)
+#define SR1_DATA  LATBbits.LATB4  // Pin 37 -> AB Shift Register 1 (Q0..Q5: LEDs 1-6, Q6: Pot1, Q7: Pot2)
 #define SR1_CLK   LATBbits.LATB5  // Pin 38 -> CLK Shift Register 1
-#define SR2_DATA  LATBbits.LATB6  // Pin 39 -> AB Shift Register 2 (LEDs 7-12)
+#define SR2_DATA  LATBbits.LATB6  // Pin 39 -> AB Shift Register 2 (Q0..Q5: LEDs 7-12, Q6: Pot3, Q7: Pot4)
 #define SR2_CLK   LATBbits.LATB7  // Pin 40 -> CLK Shift Register 2
 
 // ============================================================================
-// DEFINICIÓN DE ESTADOS DE LA FSM Y PARÁMETROS TEMPORALES
+// DEFINICIÓN DE ESTADOS DE LA FSM Y PARÁMETROS TEMPORALES (BOTONES EN AN0)
 // ============================================================================
 typedef enum {
     STATE_IDLE = 0,
@@ -45,6 +45,11 @@ typedef enum {
 #define TIEMPO_CAP_MS       20    // Espera para estabilizar capacitor de 100 nF
 #define MUESTRAS_VALIDACION 8     // 8 * 5ms = 40 ms de validación continua (rango 30-50 ms)
 #define MUESTRAS_LIBERACION 4     // 4 * 5ms = 20 ms estables en 5V para desbloquear
+
+// ============================================================================
+// UMBRAL DE CAMBIO EN POTENCIÓMETROS (0 - 1023)
+// ============================================================================
+#define UMBRAL_CAMBIO_ADC   5     // Cambio mayor a 5 cuentas activa el indicador del pot
 
 // ============================================================================
 // RANGOS ADC (10 bits: 0 - 1023) CON TOLERANCIA DE +/- 5%
@@ -119,26 +124,35 @@ void lcd_iniciar(void) {
 }
 
 // ============================================================================
-// FUNCIONES DEL ADC
+// FUNCIONES DEL ADC (AN0 botones, AN1..AN4 potenciómetros)
 // ============================================================================
 void adc_iniciar(void) {
-    TRISAbits.TRISA0 = 1; // Pin 2 (RA0 / AN0) como entrada
-    ADCON1 = 0x0E;        // Solo AN0 como analógico, referencias VDD (5V) y VSS (GND)
-    ADCON2 = 0x92;        // Justificado a la derecha, 4 TAD de adquisición, FOSC/32
-    ADCON0 = 0x01;        // Seleccionar canal AN0 y encender módulo ADC (ADON = 1)
+    TRISAbits.TRISA0 = 1; // RA0 / AN0 (Botones)
+    TRISAbits.TRISA1 = 1; // RA1 / AN1 (Pot 1)
+    TRISAbits.TRISA2 = 1; // RA2 / AN2 (Pot 2)
+    TRISAbits.TRISA3 = 1; // RA3 / AN3 (Pot 3)
+    TRISAbits.TRISA5 = 1; // RA5 / AN4 (Pot 4)
+
+    // AN0..AN4 analógicos, referencias VDD (5V) y VSS (GND)
+    ADCON1 = 0x0A;
+    // Justificado a la derecha, 4 TAD de adquisición, FOSC/32
+    ADCON2 = 0x92;
+    // Encender módulo ADC (ADON = 1)
+    ADCON0 = 0x01;
 }
 
-unsigned int adc_leer_unico(void) {
+unsigned int adc_leer_unico(uint8_t canal) {
+    ADCON0bits.CHS = canal & 0x0F;
     __delay_us(20);
     ADCON0bits.GO = 1;
     while (ADCON0bits.GO);
     return ((unsigned int)ADRESH << 8) | ADRESL;
 }
 
-unsigned int adc_leer_an0(void) {
+unsigned int adc_leer_canal(uint8_t canal) {
     unsigned long suma = 0;
     for (unsigned char i = 0; i < 8; i++) {
-        suma += adc_leer_unico();
+        suma += adc_leer_unico(canal);
     }
     return (unsigned int)(suma / 8);
 }
@@ -175,24 +189,32 @@ void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
     }
 }
 
-void actualizar_leds(uint8_t boton) {
+void actualizar_salidas(uint8_t boton, uint8_t pot1_activo, uint8_t pot2_activo,
+                        uint8_t pot3_activo, uint8_t pot4_activo) {
     uint8_t dato_sr1 = 0x00;
     uint8_t dato_sr2 = 0x00;
 
+    // LEDs de botones (1-6 en SR1 Q0..Q5, 7-12 en SR2 Q0..Q5)
     if (boton >= 1 && boton <= 6) {
-        dato_sr1 = (uint8_t)(1 << (boton - 1));
+        dato_sr1 |= (uint8_t)(1U << (boton - 1));
     } else if (boton >= 7 && boton <= 12) {
-        dato_sr2 = (uint8_t)(1 << (boton - 7));
+        dato_sr2 |= (uint8_t)(1U << (boton - 7));
     }
+
+    // Potenciómetros en Q6 y Q7 de cada shift register
+    if (pot1_activo) dato_sr1 |= (1U << 6);
+    if (pot2_activo) dato_sr1 |= (1U << 7);
+    if (pot3_activo) dato_sr2 |= (1U << 6);
+    if (pot4_activo) dato_sr2 |= (1U << 7);
 
     enviar_shift_register(1, dato_sr1);
     enviar_shift_register(2, dato_sr2);
 }
 
 // ============================================================================
-// IMPRIMIR VOLTAJE, VALOR EN BITS Y BOTÓN EN LA LCD
+// IMPRIMIR VOLTAJE, VALOR EN BITS Y BOTÓN/POT EN LA LCD
 // ============================================================================
-void mostrar_lectura(unsigned int adc_val, uint8_t boton) {
+void mostrar_lectura(unsigned int adc_val, uint8_t boton, uint8_t pot_activo_num) {
     unsigned long mv = ((unsigned long)adc_val * 5000UL) / 1023UL;
 
     // Línea 1: Voltaje formateado (ej. "Voltaje: 1.58 V")
@@ -204,7 +226,7 @@ void mostrar_lectura(unsigned int adc_val, uint8_t boton) {
     lcd_dato('0' + (unsigned char)((mv / 10) % 10));
     lcd_texto(" V  ");
 
-    // Línea 2: Valor crudo de 10 bits y botón (ej. "ADC: 0324  PB:05")
+    // Línea 2: Valor crudo de 10 bits y botón/pot (ej. "ADC: 0324  PB:05")
     lcd_comando(0xC0);
     lcd_texto("ADC: ");
     lcd_dato('0' + (unsigned char)(adc_val / 1000));
@@ -216,16 +238,28 @@ void mostrar_lectura(unsigned int adc_val, uint8_t boton) {
         lcd_texto("  PB:");
         lcd_dato('0' + (boton / 10));
         lcd_dato('0' + (boton % 10));
+    } else if (pot_activo_num >= 1 && pot_activo_num <= 4) {
+        lcd_texto("  P");
+        lcd_dato('0' + pot_activo_num);
+        lcd_texto(":ON");
     } else {
         lcd_texto("  PB:--");
     }
 }
 
 // ============================================================================
-// PROGRAMA PRINCIPAL (MÁQUINA DE ESTADOS)
+// PROGRAMA PRINCIPAL (MÁQUINA DE ESTADOS + POTENCIÓMETROS AN1..AN4)
 // ============================================================================
 void main(void) {
     SPPCONbits.SPPEN = 0; // Deshabilitar puerto paralelo en PORTD
+
+    // Configurar RA1 a RA6 como entradas digitales
+    TRISAbits.TRISA1 = 1;
+    TRISAbits.TRISA2 = 1;
+    TRISAbits.TRISA3 = 1;
+    TRISAbits.TRISA4 = 1;
+    TRISAbits.TRISA5 = 1;
+    TRISAbits.TRISA6 = 1;
 
     // Configurar pines de la LCD
     TRISD = 0x00;
@@ -245,17 +279,26 @@ void main(void) {
     lcd_iniciar();
     adc_iniciar();
 
-    // Inicializar estado en reposo (LEDs apagados)
+    // Inicializar estado de botones en reposo
     SystemState estado = STATE_IDLE;
     uint8_t boton_candidato = 0;
     uint8_t boton_confirmado = 0;
     uint8_t contador_tiempo = 0;
     uint8_t contador_lcd = 0;
 
-    actualizar_leds(0);
+    // Lecturas iniciales de referencia para potenciómetros en AN1..AN4
+    uint16_t ref_pots[4];
+    ref_pots[0] = adc_leer_canal(1); // Pot 1 -> AN1
+    ref_pots[1] = adc_leer_canal(2); // Pot 2 -> AN2
+    ref_pots[2] = adc_leer_canal(3); // Pot 3 -> AN3
+    ref_pots[3] = adc_leer_canal(4); // Pot 4 -> AN4
+
+    uint8_t pot_activo[4] = {0, 0, 0, 0};
+
+    actualizar_salidas(0, 0, 0, 0, 0);
 
     while (1) {
-        unsigned int lectura_adc = adc_leer_an0();
+        unsigned int lectura_adc = adc_leer_canal(0); // AN0: escalera de botones
 
         switch (estado) {
             // ----------------------------------------------------------------
@@ -301,8 +344,9 @@ void main(void) {
                     if (contador_tiempo >= MUESTRAS_VALIDACION) {
                         // Botón validado: encender LED y bloquear nuevas lecturas
                         boton_confirmado = boton_candidato;
-                        actualizar_leds(boton_confirmado);
-                        mostrar_lectura(lectura_adc, boton_confirmado);
+                        actualizar_salidas(boton_confirmado, pot_activo[0], pot_activo[1],
+                                           pot_activo[2], pot_activo[3]);
+                        mostrar_lectura(lectura_adc, boton_confirmado, 0);
                         contador_tiempo = 0;
                         contador_lcd = 0;
                         estado = STATE_LOCK;
@@ -322,11 +366,12 @@ void main(void) {
                 if (lectura_adc >= UMBRAL_REPOSO_5V) {
                     contador_tiempo++;
                     if (contador_tiempo >= MUESTRAS_LIBERACION) {
-                        // Liberación confirmada -> apagar LEDs y regresar a IDLE
+                        // Liberación confirmada -> apagar LED de botón y regresar a IDLE
                         boton_confirmado = 0;
                         boton_candidato = 0;
-                        actualizar_leds(0);
-                        mostrar_lectura(lectura_adc, 0);
+                        actualizar_salidas(0, pot_activo[0], pot_activo[1],
+                                           pot_activo[2], pot_activo[3]);
+                        mostrar_lectura(lectura_adc, 0, 0);
                         contador_lcd = 0;
                         estado = STATE_IDLE;
                     }
@@ -337,11 +382,34 @@ void main(void) {
                 break;
         }
 
-        // Refrescar lectura en LCD cada 200 ms (40 ticks * 5 ms)
+        // Revisar potenciómetros AN1..AN4 (cambio > 5 unidades ADC)
+        uint8_t pot_mostrado = 0;
+        for (uint8_t i = 0; i < 4; i++) {
+            uint16_t val_pot = adc_leer_canal(i + 1);
+            uint16_t diff = (val_pot > ref_pots[i])
+                          ? (val_pot - ref_pots[i])
+                          : (ref_pots[i] - val_pot);
+
+            if (diff > UMBRAL_CAMBIO_ADC) {
+                pot_activo[i] = 1;
+                ref_pots[i] = val_pot;
+                pot_mostrado = i + 1;
+            } else {
+                pot_activo[i] = 0;
+            }
+        }
+
+        actualizar_salidas(boton_confirmado, pot_activo[0], pot_activo[1],
+                           pot_activo[2], pot_activo[3]);
+
+        // Refrescar lectura en LCD cada 200 ms (40 ticks * 5 ms) o al detectar pot activo
         __delay_ms(TICK_MS);
         contador_lcd++;
-        if (contador_lcd >= 40) {
-            mostrar_lectura(lectura_adc, boton_confirmado);
+        if (pot_mostrado > 0) {
+            mostrar_lectura(lectura_adc, boton_confirmado, pot_mostrado);
+            contador_lcd = 0;
+        } else if (contador_lcd >= 40) {
+            mostrar_lectura(lectura_adc, boton_confirmado, 0);
             contador_lcd = 0;
         }
     }
