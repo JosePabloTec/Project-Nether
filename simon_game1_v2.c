@@ -27,8 +27,8 @@
 
 // ============================================================================
 // SHIFT REGISTERS
-// SR1: LEDs 1-6
-// SR2: LEDs 7-12
+// SR1: Q0..Q5 -> LEDs 1-6, Q6 -> Pot 1, Q7 -> Pot 2
+// SR2: Q0..Q5 -> LEDs 7-12, Q6 -> Pot 3, Q7 -> Pot 4
 // ============================================================================
 
 #define SR1_DATA LATBbits.LATB4
@@ -42,11 +42,13 @@
 
 #define TICK_MS                 5
 #define UMBRAL_REPOSO_5V        980
+#define UMBRAL_CAMBIO_POT       200    // Desplazamiento >= 200 unidades ADC (+200 o -200)
+#define UMBRAL_MOVIMIENTO_POT   3      // Cambio >= 3 unidades respecto a la medicion previa
 
 #define MUESTRAS_VALIDACION     8
-#define MUESTRAS_LIBERACION    4
+#define MUESTRAS_LIBERACION     4
 
-#define TIEMPO_LED              600    // 3000 ms
+#define TIEMPO_LED              200    // 1000 ms
 #define TIEMPO_ENTRE_LEDS       100    // 500 ms
 
 #define TIEMPO_INTRO            400    // 2000 ms
@@ -55,6 +57,10 @@
 #define TIEMPO_PANTALLA_OFF     100    // 500 ms
 
 #define MAX_SECUENCIA           255
+
+// Entradas 1..12 = Botones PB1..PB12; Entradas 13..16 = Potenciometros 1..4
+#define ENTRADA_POT_BASE        13
+#define TOTAL_ENTRADAS          16
 
 // ============================================================================
 // MELODIA ORIGINAL DEL ARDUINO
@@ -141,8 +147,11 @@ uint16_t puntaje = 0;
 
 uint16_t temporizador = 0;
 
-uint8_t boton_candidato = 0;
-uint8_t boton_confirmado = 0;
+uint8_t entrada_candidata = 0;
+uint8_t entrada_confirmada = 0;
+
+uint16_t ref_pots[4] = {0, 0, 0, 0};
+uint16_t prev_pots[4] = {0, 0, 0, 0};
 
 uint8_t contador_estabilidad = 0;
 uint8_t contador_liberacion = 0;
@@ -243,19 +252,25 @@ void lcd_numero(uint16_t numero) {
 }
 
 // ============================================================================
-// ADC
+// ADC (AN0 botones, AN1..AN4 potenciometros)
 // ============================================================================
 
 void adc_iniciar(void) {
 
-    TRISAbits.TRISA0 = 1;
+    TRISAbits.TRISA0 = 1; // RA0 / AN0 (Botones)
+    TRISAbits.TRISA1 = 1; // RA1 / AN1 (Pot 1)
+    TRISAbits.TRISA2 = 1; // RA2 / AN2 (Pot 2)
+    TRISAbits.TRISA3 = 1; // RA3 / AN3 (Pot 3)
+    TRISAbits.TRISA5 = 1; // RA5 / AN4 (Pot 4)
 
-    ADCON1 = 0x0E;
-    ADCON2 = 0x92;
-    ADCON0 = 0x01;
+    ADCON1 = 0x0A;        // AN0..AN4 analogicos, VDD/VSS como referencia
+    ADCON2 = 0x92;        // Justificado a la derecha, 4 TAD, FOSC/32
+    ADCON0 = 0x01;        // Encender ADC
 }
 
-unsigned int adc_leer_unico(void) {
+unsigned int adc_leer_unico(uint8_t canal) {
+
+    ADCON0bits.CHS = canal & 0x0F;
 
     __delay_us(20);
 
@@ -266,19 +281,33 @@ unsigned int adc_leer_unico(void) {
     return ((unsigned int)ADRESH << 8) | ADRESL;
 }
 
-unsigned int adc_leer_an0(void) {
+unsigned int adc_leer_canal(uint8_t canal) {
 
     unsigned long suma = 0;
 
     for (uint8_t i = 0; i < 8; i++) {
-        suma += adc_leer_unico();
+        suma += adc_leer_unico(canal);
     }
 
     return (unsigned int)(suma / 8);
 }
 
+unsigned int adc_leer_an0(void) {
+
+    return adc_leer_canal(0);
+}
+
+void capturar_referencia_pots(void) {
+
+    for (uint8_t i = 0; i < 4; i++) {
+        uint16_t val = adc_leer_canal((uint8_t)(i + 1));
+        ref_pots[i] = val;
+        prev_pots[i] = val;
+    }
+}
+
 // ============================================================================
-// IDENTIFICAR BOTON
+// IDENTIFICAR BOTON Y POTENCIOMETROS
 // ============================================================================
 
 uint8_t identificar_boton(unsigned int adc_val) {
@@ -290,6 +319,40 @@ uint8_t identificar_boton(unsigned int adc_val) {
 
             return i + 1;
         }
+    }
+
+    return 0;
+}
+
+uint16_t abs_diff_u16(uint16_t a, uint16_t b) {
+
+    return (a > b) ? (a - b) : (b - a);
+}
+
+uint8_t detectar_pot_activo(const uint16_t lect_pots[4]) {
+
+    for (uint8_t i = 0; i < 4; i++) {
+
+        uint16_t delta_ref = abs_diff_u16(lect_pots[i], ref_pots[i]);
+        uint16_t delta_prev = abs_diff_u16(lect_pots[i], prev_pots[i]);
+
+        if (delta_ref >= UMBRAL_CAMBIO_POT && delta_prev >= UMBRAL_MOVIMIENTO_POT) {
+            return (uint8_t)(ENTRADA_POT_BASE + i); // 13..16
+        }
+    }
+
+    return 0;
+}
+
+uint8_t entrada_activa_actual(unsigned int adc_btn, const uint16_t lect_pots[4]) {
+
+    uint8_t pot = detectar_pot_activo(lect_pots);
+    if (pot > 0) {
+        return pot;
+    }
+
+    if (adc_btn < UMBRAL_REPOSO_5V) {
+        return identificar_boton(adc_btn);
     }
 
     return 0;
@@ -327,31 +390,51 @@ void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
 }
 
 // ============================================================================
-// ENCENDER UN LED
-// boton = 1-12
-// boton = 0 apaga todos
+// ENCENDER INDICADOR DE BOTON (1-12) O POTENCIOMETRO (13-16)
+// entrada = 0 apaga todos
 // ============================================================================
 
-void actualizar_leds(uint8_t boton) {
+void actualizar_salidas(uint8_t entrada) {
 
     uint8_t dato_sr1 = 0x00;
     uint8_t dato_sr2 = 0x00;
 
-    if (boton >= 1 && boton <= 6) {
+    if (entrada >= 1 && entrada <= 6) {
 
-        dato_sr1 = (uint8_t)(1 << (boton - 1));
+        dato_sr1 = (uint8_t)(1U << (entrada - 1));
 
-    } else if (boton >= 7 && boton <= 12) {
+    } else if (entrada >= 7 && entrada <= 12) {
 
-        dato_sr2 = (uint8_t)(1 << (boton - 7));
+        dato_sr2 = (uint8_t)(1U << (entrada - 7));
+
+    } else if (entrada == 13) {
+
+        dato_sr1 = (uint8_t)(1U << 6); // Pot 1 -> SR1 Q6
+
+    } else if (entrada == 14) {
+
+        dato_sr1 = (uint8_t)(1U << 7); // Pot 2 -> SR1 Q7
+
+    } else if (entrada == 15) {
+
+        dato_sr2 = (uint8_t)(1U << 6); // Pot 3 -> SR2 Q6
+
+    } else if (entrada == 16) {
+
+        dato_sr2 = (uint8_t)(1U << 7); // Pot 4 -> SR2 Q7
     }
 
     enviar_shift_register(1, dato_sr1);
     enviar_shift_register(2, dato_sr2);
 }
 
+void actualizar_leds(uint8_t boton) {
+
+    actualizar_salidas(boton);
+}
+
 // ============================================================================
-// GENERADOR DE NUMEROS ALEATORIOS
+// GENERADOR DE NUMEROS ALEATORIOS (1..16 CON IGUAL PROBABILIDAD)
 // ============================================================================
 
 uint8_t numero_aleatorio(void) {
@@ -359,13 +442,14 @@ uint8_t numero_aleatorio(void) {
     uint16_t mezcla;
 
     mezcla = ((uint16_t)TMR0L << 8);
-    mezcla ^= adc_leer_unico();
+    mezcla ^= adc_leer_unico(0);
+    mezcla ^= adc_leer_unico((uint8_t)((nivel % 4) + 1));
     mezcla ^= (uint16_t)(nivel * 37);
     mezcla ^= (uint16_t)(puntaje * 13);
 
     mezcla = (mezcla * 109UL + 89UL);
 
-    return (uint8_t)((mezcla % 12) + 1);
+    return (uint8_t)((mezcla % TOTAL_ENTRADAS) + 1);
 }
 
 // ============================================================================
@@ -441,11 +525,6 @@ void sonido_iniciar(void) {
 
     CCP2CON = 0x00;
 
-    // Timer1:
-    // Internal clock = Fosc/4
-    // Prescaler = 1:8
-    // 16-bit read/write enabled
-
     T1CON = 0xB0;
 
     TMR1H = 0;
@@ -453,10 +532,6 @@ void sonido_iniciar(void) {
 
     PIR2bits.CCP2IF = 0;
 }
-
-// ============================================================================
-// INICIAR UNA NOTA
-// ============================================================================
 
 void play_note(uint16_t frequency) {
 
@@ -483,16 +558,10 @@ void play_note(uint16_t frequency) {
 
     PIR2bits.CCP2IF = 0;
 
-    // Compare mode: toggle CCP2 output on match
-
     CCP2CON = 0x02;
 
     T1CONbits.TMR1ON = 1;
 }
-
-// ============================================================================
-// ACTUALIZAR CCP2 DURANTE LA REPRODUCCION
-// ============================================================================
 
 void sonido_actualizar(void) {
 
@@ -510,10 +579,6 @@ void sonido_actualizar(void) {
     }
 }
 
-// ============================================================================
-// DETENER SONIDO
-// ============================================================================
-
 void stop_note(void) {
 
     CCP2CON = 0x00;
@@ -524,10 +589,6 @@ void stop_note(void) {
 
     PIR2bits.CCP2IF = 0;
 }
-
-// ============================================================================
-// ESPERA CON ACTUALIZACION DEL SONIDO
-// ============================================================================
 
 void sonido_delay_ms(uint16_t ms) {
 
@@ -541,10 +602,6 @@ void sonido_delay_ms(uint16_t ms) {
         }
     }
 }
-
-// ============================================================================
-// REPRODUCIR MELODIA ORIGINAL
-// ============================================================================
 
 void play_completion_melody(void) {
 
@@ -603,7 +660,7 @@ void inicializar_hardware(void) {
 
     sonido_iniciar();
 
-    actualizar_leds(0);
+    actualizar_salidas(0);
 }
 
 // ============================================================================
@@ -619,6 +676,14 @@ void main(void) {
     while (1) {
 
         unsigned int lectura_adc = adc_leer_an0();
+        uint16_t lect_pots[4];
+        lect_pots[0] = adc_leer_canal(1);
+        lect_pots[1] = adc_leer_canal(2);
+        lect_pots[2] = adc_leer_canal(3);
+        lect_pots[3] = adc_leer_canal(4);
+
+        uint8_t entrada_detectada = entrada_activa_actual(lectura_adc, lect_pots);
+        uint8_t pot_activo = detectar_pot_activo(lect_pots);
 
         switch (estado) {
 
@@ -628,7 +693,7 @@ void main(void) {
 
             case GAME_INTRO:
 
-                actualizar_leds(0);
+                actualizar_salidas(0);
 
                 mostrar_intro();
 
@@ -652,12 +717,12 @@ void main(void) {
                 break;
 
             // ================================================================
-            // AGREGAR UN NUEVO BOTON A LA SECUENCIA
+            // AGREGAR UNA NUEVA ENTRADA (1..12 BOTON, 13..16 POT) A LA SECUENCIA
             // ================================================================
 
             case GAME_ADD:
 
-                actualizar_leds(0);
+                actualizar_salidas(0);
 
                 if (nivel >= MAX_SECUENCIA) {
 
@@ -673,8 +738,6 @@ void main(void) {
 
                 temporizador = 0;
 
-                // Mostrar el mensaje durante toda la demostracion.
-
                 mostrar_recuerda();
 
                 estado = GAME_SHOW_ON;
@@ -682,12 +745,12 @@ void main(void) {
                 break;
 
             // ================================================================
-            // ENCENDER EL LED ACTUAL
+            // ENCENDER EL LED CORRESPONDIENTE A LA ENTRADA ACTUAL
             // ================================================================
 
             case GAME_SHOW_ON:
 
-                actualizar_leds(secuencia[indice_demostracion]);
+                actualizar_salidas(secuencia[indice_demostracion]);
 
                 temporizador = 0;
 
@@ -705,9 +768,7 @@ void main(void) {
 
                 if (temporizador >= TIEMPO_LED) {
 
-                    // Apagar todos los LEDs antes de pasar al siguiente.
-
-                    actualizar_leds(0);
+                    actualizar_salidas(0);
 
                     temporizador = 0;
 
@@ -732,24 +793,21 @@ void main(void) {
 
                     if (indice_demostracion >= nivel) {
 
-                        // La demostracion termino.
-
                         indice_jugador = 0;
 
-                        boton_candidato = 0;
-                        boton_confirmado = 0;
+                        entrada_candidata = 0;
+                        entrada_confirmada = 0;
 
                         contador_estabilidad = 0;
                         contador_liberacion = 0;
+
+                        capturar_referencia_pots();
 
                         mostrar_turno();
 
                         estado = GAME_WAIT_PRESS;
 
                     } else {
-
-                        // Mostrar el siguiente LED.
-                        // La pausa se aplica incluso si es igual al anterior.
 
                         estado = GAME_SHOW_ON;
                     }
@@ -758,50 +816,45 @@ void main(void) {
                 break;
 
             // ================================================================
-            // ESPERAR UNA PULSACION
+            // ESPERAR UNA PULSACION DE BOTON O GIRO >= 200 EN POTENCIOMETRO
             // ================================================================
 
             case GAME_WAIT_PRESS:
 
-                if (lectura_adc < UMBRAL_REPOSO_5V) {
+                if (entrada_detectada > 0) {
 
-                    boton_candidato = identificar_boton(lectura_adc);
+                    entrada_candidata = entrada_detectada;
 
-                    if (boton_candidato > 0) {
+                    contador_estabilidad = 0;
 
-                        contador_estabilidad = 0;
+                    estado = GAME_VALIDATE;
 
-                        estado = GAME_VALIDATE;
+                } else if (lectura_adc < UMBRAL_REPOSO_5V) {
 
-                    } else {
+                    contador_liberacion = 0;
 
-                        contador_liberacion = 0;
-
-                        estado = GAME_WAIT_INVALID_RELEASE;
-                    }
+                    estado = GAME_WAIT_INVALID_RELEASE;
                 }
 
                 break;
 
             // ================================================================
-            // VALIDAR PULSACION
+            // VALIDAR ENTRADA
             // ================================================================
 
             case GAME_VALIDATE:
 
-                if (identificar_boton(lectura_adc) == boton_candidato) {
+                if (entrada_detectada == entrada_candidata) {
 
                     contador_estabilidad++;
 
                     if (contador_estabilidad >= MUESTRAS_VALIDACION) {
 
-                        boton_confirmado = boton_candidato;
+                        entrada_confirmada = entrada_candidata;
 
-                        // Encender solamente el LED correspondiente.
+                        actualizar_salidas(entrada_confirmada);
 
-                        actualizar_leds(boton_confirmado);
-
-                        if (boton_confirmado ==
+                        if (entrada_confirmada ==
                             secuencia[indice_jugador]) {
 
                             puntaje++;
@@ -830,12 +883,12 @@ void main(void) {
                 break;
 
             // ================================================================
-            // ESPERAR LIBERACION DE PULSACION INVALIDA
+            // ESPERAR LIBERACION DE ENTRADA INVALIDA
             // ================================================================
 
             case GAME_WAIT_INVALID_RELEASE:
 
-                if (lectura_adc >= UMBRAL_REPOSO_5V) {
+                if (lectura_adc >= UMBRAL_REPOSO_5V && pot_activo == 0) {
 
                     contador_liberacion++;
 
@@ -845,7 +898,9 @@ void main(void) {
 
                         contador_estabilidad = 0;
 
-                        boton_candidato = 0;
+                        entrada_candidata = 0;
+
+                        capturar_referencia_pots();
 
                         estado = GAME_WAIT_PRESS;
                     }
@@ -858,12 +913,12 @@ void main(void) {
                 break;
 
             // ================================================================
-            // ESPERAR QUE EL USUARIO SUELTE EL BOTON
+            // ESPERAR QUE EL USUARIO SUELTE EL BOTON / DETENGA EL POTENCIOMETRO
             // ================================================================
 
             case GAME_WAIT_RELEASE:
 
-                if (lectura_adc >= UMBRAL_REPOSO_5V) {
+                if (lectura_adc >= UMBRAL_REPOSO_5V && pot_activo == 0) {
 
                     contador_liberacion++;
 
@@ -871,20 +926,18 @@ void main(void) {
 
                         contador_liberacion = 0;
 
-                        boton_confirmado = 0;
-                        boton_candidato = 0;
+                        entrada_confirmada = 0;
+                        entrada_candidata = 0;
 
-                        actualizar_leds(0);
+                        actualizar_salidas(0);
 
                         if (indice_jugador >= nivel) {
-
-                            // El nivel se completo.
 
                             estado = GAME_SUCCESS;
 
                         } else {
 
-                            // Aceptar la siguiente entrada inmediatamente.
+                            capturar_referencia_pots();
 
                             estado = GAME_WAIT_PRESS;
                         }
@@ -903,15 +956,11 @@ void main(void) {
 
             case GAME_SUCCESS:
 
-                actualizar_leds(0);
+                actualizar_salidas(0);
 
                 mostrar_exito();
 
-                // La musica es la unica transicion entre niveles.
-
                 play_completion_melody();
-
-                // No hay espera adicional despues de la melodia.
 
                 temporizador = 0;
 
@@ -925,7 +974,7 @@ void main(void) {
 
             case GAME_OVER:
 
-                actualizar_leds(0);
+                actualizar_salidas(0);
 
                 stop_note();
 
@@ -937,15 +986,13 @@ void main(void) {
 
                 break;
 
-            // Mantener Perdiste + Puntaje durante 4 segundos.
-
             case GAME_OVER_WAIT:
 
                 temporizador++;
 
                 if (temporizador >= TIEMPO_PERDER) {
 
-                    actualizar_leds(0);
+                    actualizar_salidas(0);
 
                     limpiar_pantalla();
 
@@ -974,15 +1021,15 @@ void main(void) {
 
                     temporizador = 0;
 
-                    boton_candidato = 0;
-                    boton_confirmado = 0;
+                    entrada_candidata = 0;
+                    entrada_confirmada = 0;
 
                     contador_estabilidad = 0;
                     contador_liberacion = 0;
 
                     indice_demostracion = 0;
 
-                    actualizar_leds(0);
+                    actualizar_salidas(0);
 
                     estado = GAME_INTRO;
                 }
@@ -993,7 +1040,7 @@ void main(void) {
 
                 stop_note();
 
-                actualizar_leds(0);
+                actualizar_salidas(0);
 
                 nivel = 0;
                 indice_jugador = 0;
@@ -1004,6 +1051,10 @@ void main(void) {
                 estado = GAME_INTRO;
 
                 break;
+        }
+
+        for (uint8_t i = 0; i < 4; i++) {
+            prev_pots[i] = lect_pots[i];
         }
 
         __delay_ms(TICK_MS);
