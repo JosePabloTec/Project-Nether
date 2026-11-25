@@ -29,12 +29,15 @@
 // SHIFT REGISTERS
 // SR1: Q0..Q5 -> LEDs 1-6, Q6 -> Pot 1, Q7 -> Pot 2
 // SR2: Q0..Q5 -> LEDs 7-12, Q6 -> Pot 3, Q7 -> Pot 4
+// SR3: RB2 -> A (Datos), RB3 -> CLK (Q0..Q3 racha de secuencias)
 // ============================================================================
 
 #define SR1_DATA LATBbits.LATB4
 #define SR1_CLK  LATBbits.LATB5
 #define SR2_DATA LATBbits.LATB6
 #define SR2_CLK  LATBbits.LATB7
+#define SR3_DATA LATBbits.LATB2
+#define SR3_CLK  LATBbits.LATB3
 
 // ============================================================================
 // PARAMETROS DEL JUEGO
@@ -55,6 +58,7 @@
 
 #define TIEMPO_PERDER           800    // 4000 ms
 #define TIEMPO_PANTALLA_OFF     100    // 500 ms
+#define RACHA_OBJETIVO_SR3      4
 
 #define MAX_SECUENCIA           255
 
@@ -63,7 +67,7 @@
 #define TOTAL_ENTRADAS          16
 
 // ============================================================================
-// MELODIA ORIGINAL DEL ARDUINO
+// MELODIA ORIGINAL DEL ARDUINO Y TONOS DE SECUENCIA / ERROR
 // ============================================================================
 
 const uint16_t melody[] = {
@@ -81,6 +85,16 @@ const uint16_t duration[] = {
 };
 
 #define NUMBER_NOTES (sizeof(melody) / sizeof(melody[0]))
+
+const uint16_t melodia_transicion[] = {
+    659, 784, 1047, 1175, 1319
+};
+
+const uint16_t duracion_transicion[] = {
+    60, 60, 80, 80, 140
+};
+
+#define NUM_NOTAS_TRANSICION (sizeof(melodia_transicion) / sizeof(melodia_transicion[0]))
 
 uint16_t half_period_counts = 0;
 
@@ -144,6 +158,7 @@ uint8_t secuencia[MAX_SECUENCIA];
 uint16_t nivel = 0;
 uint16_t indice_jugador = 0;
 uint16_t puntaje = 0;
+uint8_t racha_sr3 = 0;
 
 uint16_t temporizador = 0;
 
@@ -359,160 +374,6 @@ uint8_t entrada_activa_actual(unsigned int adc_btn, const uint16_t lect_pots[4])
 }
 
 // ============================================================================
-// SHIFT REGISTERS
-// ============================================================================
-
-void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
-
-    for (int8_t bit = 7; bit >= 0; bit--) {
-
-        uint8_t estado_bit = (datos >> bit) & 0x01;
-
-        if (sr_num == 1) {
-
-            SR1_DATA = estado_bit;
-
-            __delay_us(2);
-            SR1_CLK = 1;
-            __delay_us(2);
-            SR1_CLK = 0;
-
-        } else {
-
-            SR2_DATA = estado_bit;
-
-            __delay_us(2);
-            SR2_CLK = 1;
-            __delay_us(2);
-            SR2_CLK = 0;
-        }
-    }
-}
-
-// ============================================================================
-// ENCENDER INDICADOR DE BOTON (1-12) O POTENCIOMETRO (13-16)
-// entrada = 0 apaga todos
-// ============================================================================
-
-void actualizar_salidas(uint8_t entrada) {
-
-    uint8_t dato_sr1 = 0x00;
-    uint8_t dato_sr2 = 0x00;
-
-    if (entrada >= 1 && entrada <= 6) {
-
-        dato_sr1 = (uint8_t)(1U << (entrada - 1));
-
-    } else if (entrada >= 7 && entrada <= 12) {
-
-        dato_sr2 = (uint8_t)(1U << (entrada - 7));
-
-    } else if (entrada == 13) {
-
-        dato_sr1 = (uint8_t)(1U << 6); // Pot 1 -> SR1 Q6
-
-    } else if (entrada == 14) {
-
-        dato_sr1 = (uint8_t)(1U << 7); // Pot 2 -> SR1 Q7
-
-    } else if (entrada == 15) {
-
-        dato_sr2 = (uint8_t)(1U << 6); // Pot 3 -> SR2 Q6
-
-    } else if (entrada == 16) {
-
-        dato_sr2 = (uint8_t)(1U << 7); // Pot 4 -> SR2 Q7
-    }
-
-    enviar_shift_register(1, dato_sr1);
-    enviar_shift_register(2, dato_sr2);
-}
-
-void actualizar_leds(uint8_t boton) {
-
-    actualizar_salidas(boton);
-}
-
-// ============================================================================
-// GENERADOR DE NUMEROS ALEATORIOS (1..16 CON IGUAL PROBABILIDAD)
-// ============================================================================
-
-uint8_t numero_aleatorio(void) {
-
-    uint16_t mezcla;
-
-    mezcla = ((uint16_t)TMR0L << 8);
-    mezcla ^= adc_leer_unico(0);
-    mezcla ^= adc_leer_unico((uint8_t)((nivel % 4) + 1));
-    mezcla ^= (uint16_t)(nivel * 37);
-    mezcla ^= (uint16_t)(puntaje * 13);
-
-    mezcla = (mezcla * 109UL + 89UL);
-
-    return (uint8_t)((mezcla % TOTAL_ENTRADAS) + 1);
-}
-
-// ============================================================================
-// MENSAJES LCD
-// ============================================================================
-
-void mostrar_intro(void) {
-
-    lcd_comando(0x01);
-
-    lcd_comando(0x80);
-    lcd_texto("Sigue la");
-
-    lcd_comando(0xC0);
-    lcd_texto("secuencia");
-}
-
-void mostrar_recuerda(void) {
-
-    lcd_comando(0x01);
-
-    lcd_comando(0x80);
-    lcd_texto("Recuerda la");
-
-    lcd_comando(0xC0);
-    lcd_texto("secuencia");
-}
-
-void mostrar_turno(void) {
-
-    lcd_comando(0x01);
-
-    lcd_comando(0x80);
-    lcd_texto("Tu turno");
-}
-
-void mostrar_exito(void) {
-
-    lcd_comando(0x01);
-
-    lcd_comando(0x80);
-    lcd_texto("Bien hecho!");
-}
-
-void mostrar_derrota(void) {
-
-    lcd_comando(0x01);
-
-    lcd_comando(0x80);
-    lcd_texto("Perdiste");
-
-    lcd_comando(0xC0);
-    lcd_texto("Puntaje: ");
-
-    lcd_numero(puntaje);
-}
-
-void limpiar_pantalla(void) {
-
-    lcd_comando(0x01);
-}
-
-// ============================================================================
 // SONIDO CCP2 - RC1 PIN 16
 // Timer1 + Compare Toggle Mode
 // ============================================================================
@@ -594,9 +455,9 @@ void sonido_delay_ms(uint16_t ms) {
 
     while (ms--) {
 
-        for (uint8_t i = 0; i < 10; i++) {
+        for (uint8_t i = 0; i < 100; i++) {
 
-            __delay_us(100);
+            __delay_us(10);
 
             sonido_actualizar();
         }
@@ -621,6 +482,240 @@ void play_completion_melody(void) {
     stop_note();
 }
 
+void play_transition_celebration(void) {
+
+    stop_note();
+
+    for (uint8_t i = 0; i < NUM_NOTAS_TRANSICION; i++) {
+
+        play_note(melodia_transicion[i]);
+
+        sonido_delay_ms(duracion_transicion[i]);
+
+        stop_note();
+
+        sonido_delay_ms(15);
+    }
+
+    stop_note();
+}
+
+void play_error_tone(void) {
+
+    stop_note();
+
+    play_note(220);
+
+    sonido_delay_ms(180);
+
+    stop_note();
+}
+
+// ============================================================================
+// SHIFT REGISTERS
+// ============================================================================
+
+void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
+
+    for (int8_t bit = 7; bit >= 0; bit--) {
+
+        uint8_t estado_bit = (datos >> bit) & 0x01;
+
+        if (sr_num == 1) {
+
+            SR1_DATA = estado_bit;
+
+            __delay_us(2);
+            SR1_CLK = 1;
+            __delay_us(2);
+            SR1_CLK = 0;
+
+        } else {
+
+            SR2_DATA = estado_bit;
+
+            __delay_us(2);
+            SR2_CLK = 1;
+            __delay_us(2);
+            SR2_CLK = 0;
+        }
+    }
+}
+
+void enviar_sr3(uint8_t datos) {
+
+    for (int8_t bit = 7; bit >= 0; bit--) {
+
+        SR3_DATA = (datos >> bit) & 0x01;
+
+        __delay_us(2);
+        SR3_CLK = 1;
+        __delay_us(2);
+        SR3_CLK = 0;
+        __delay_us(2);
+    }
+}
+
+// ============================================================================
+// MENSAJES LCD (CON "J1" SIEMPRE ARRIBA A LA IZQUIERDA)
+// ============================================================================
+
+void lcd_etiqueta_j1(void) {
+
+    lcd_comando(0x80);
+    lcd_texto("J1 ");
+}
+
+void mostrar_intro(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+    lcd_texto("Sigue la");
+
+    lcd_comando(0xC0);
+    lcd_texto("secuencia");
+}
+
+void mostrar_recuerda(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+    lcd_texto("Recuerda");
+
+    lcd_comando(0xC0);
+    lcd_texto("la secuencia");
+}
+
+void mostrar_turno(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+    lcd_texto("Tu turno");
+}
+
+void mostrar_exito(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+    lcd_texto("Bien hecho!");
+}
+
+void mostrar_increible(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+    lcd_texto("Increible");
+}
+
+void mostrar_derrota(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+    lcd_texto("Perdiste");
+
+    lcd_comando(0xC0);
+    lcd_texto("Puntaje: ");
+
+    lcd_numero(puntaje);
+}
+
+void limpiar_pantalla(void) {
+
+    lcd_comando(0x01);
+
+    lcd_etiqueta_j1();
+}
+
+void actualizar_racha_sr3(void) {
+
+    racha_sr3++;
+
+    if (racha_sr3 >= RACHA_OBJETIVO_SR3) {
+
+        enviar_sr3((uint8_t)(1U << 3)); // Q3 encendido al llegar a 4
+
+        mostrar_increible();
+
+        play_completion_melody();
+
+        racha_sr3 = 0;
+        enviar_sr3(0x00); // Q0..Q3 en bajo
+    } else {
+
+        // Solo el LED actual encendido (apaga los anteriores en la barra)
+        enviar_sr3((uint8_t)(1U << (racha_sr3 - 1)));
+    }
+}
+
+// ============================================================================
+// ENCENDER INDICADOR DE BOTON (1-12) O POTENCIOMETRO (13-16)
+// entrada = 0 apaga todos
+// ============================================================================
+
+void actualizar_salidas(uint8_t entrada) {
+
+    uint8_t dato_sr1 = 0x00;
+    uint8_t dato_sr2 = 0x00;
+
+    if (entrada >= 1 && entrada <= 6) {
+
+        dato_sr1 = (uint8_t)(1U << (entrada - 1));
+
+    } else if (entrada >= 7 && entrada <= 12) {
+
+        dato_sr2 = (uint8_t)(1U << (entrada - 7));
+
+    } else if (entrada == 13) {
+
+        dato_sr1 = (uint8_t)(1U << 6); // Pot 1 -> SR1 Q6
+
+    } else if (entrada == 14) {
+
+        dato_sr1 = (uint8_t)(1U << 7); // Pot 2 -> SR1 Q7
+
+    } else if (entrada == 15) {
+
+        dato_sr2 = (uint8_t)(1U << 6); // Pot 3 -> SR2 Q6
+
+    } else if (entrada == 16) {
+
+        dato_sr2 = (uint8_t)(1U << 7); // Pot 4 -> SR2 Q7
+    }
+
+    enviar_shift_register(1, dato_sr1);
+    enviar_shift_register(2, dato_sr2);
+}
+
+void actualizar_leds(uint8_t boton) {
+
+    actualizar_salidas(boton);
+}
+
+// ============================================================================
+// GENERADOR DE NUMEROS ALEATORIOS (1..16 CON IGUAL PROBABILIDAD)
+// ============================================================================
+
+uint8_t numero_aleatorio(void) {
+
+    uint16_t mezcla;
+
+    mezcla = ((uint16_t)TMR0L << 8);
+    mezcla ^= adc_leer_unico(0);
+    mezcla ^= adc_leer_unico((uint8_t)((nivel % 4) + 1));
+    mezcla ^= (uint16_t)(nivel * 37);
+    mezcla ^= (uint16_t)(puntaje * 13);
+
+    mezcla = (mezcla * 109UL + 89UL);
+
+    return (uint8_t)((mezcla % TOTAL_ENTRADAS) + 1);
+}
+
 // ============================================================================
 // INICIALIZACION DEL HARDWARE
 // ============================================================================
@@ -643,11 +738,15 @@ void inicializar_hardware(void) {
 
     // Shift registers
 
+    TRISBbits.TRISB2 = 0;
+    TRISBbits.TRISB3 = 0;
     TRISBbits.TRISB4 = 0;
     TRISBbits.TRISB5 = 0;
     TRISBbits.TRISB6 = 0;
     TRISBbits.TRISB7 = 0;
 
+    SR3_DATA = 0;
+    SR3_CLK = 0;
     LATB &= 0x0F;
 
     // Timer0: fuente de variacion aleatoria
@@ -661,6 +760,8 @@ void inicializar_hardware(void) {
     sonido_iniciar();
 
     actualizar_salidas(0);
+    racha_sr3 = 0;
+    enviar_sr3(0x00);
 }
 
 // ============================================================================
@@ -960,7 +1061,9 @@ void main(void) {
 
                 mostrar_exito();
 
-                play_completion_melody();
+                play_transition_celebration();
+
+                actualizar_racha_sr3();
 
                 temporizador = 0;
 
@@ -976,7 +1079,10 @@ void main(void) {
 
                 actualizar_salidas(0);
 
-                stop_note();
+                racha_sr3 = 0;
+                enviar_sr3(0x00);
+
+                play_error_tone();
 
                 mostrar_derrota();
 
@@ -1019,6 +1125,9 @@ void main(void) {
 
                     puntaje = 0;
 
+                    racha_sr3 = 0;
+                    enviar_sr3(0x00);
+
                     temporizador = 0;
 
                     entrada_candidata = 0;
@@ -1041,6 +1150,9 @@ void main(void) {
                 stop_note();
 
                 actualizar_salidas(0);
+
+                racha_sr3 = 0;
+                enviar_sr3(0x00);
 
                 nivel = 0;
                 indice_jugador = 0;
