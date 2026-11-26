@@ -30,9 +30,11 @@
 #define SR1_CLK   LATBbits.LATB5  // Pin 38 -> CLK Shift Register 1
 #define SR2_DATA  LATBbits.LATB6  // Pin 39 -> AB Shift Register 2 (Q0..Q5: LEDs 7-12)
 #define SR2_CLK   LATBbits.LATB7  // Pin 40 -> CLK Shift Register 2
+#define SR3_DATA  LATBbits.LATB2  // RB2 -> A del 74164 (datos barra de racha)
+#define SR3_CLK   LATBbits.LATB3  // RB3 -> CLK del 74164 (reloj barra de racha)
 
 // ============================================================================
-// PARÁMETROS DE LA FSM DE BOTONES (AN0)
+// PARÁMETROS DE LA FSM DE BOTONES (AN0) Y RACHA SR3
 // ============================================================================
 typedef enum {
     STATE_IDLE = 0,
@@ -43,33 +45,53 @@ typedef enum {
 
 #define UMBRAL_REPOSO_5V    980   // >= 980 cuentas (~4.79V) sin botón presionado
 #define TICK_MS             5     // Base de tiempo de la máquina de estados (5 ms)
-#define TIEMPO_CAP_MS       20    // Estabilización capacitor 100 nF
-#define MUESTRAS_VALIDACION 8     // 40 ms validación continua
-#define MUESTRAS_LIBERACION 4     // 20 ms estables en 5V para desbloquear
+#define TIEMPO_CAP_MS       20    // Espera para estabilizar capacitor de 100 nF
+#define MUESTRAS_VALIDACION 8     // 8 * 5ms = 40 ms de validación continua
+#define MUESTRAS_LIBERACION 4     // 4 * 5ms = 20 ms estables en 5V para desbloquear
+#define RACHA_OBJETIVO_SR3  4     // 4 aciertos completos -> "Increible" + reinicio
 
+// ============================================================================
+// RANGOS ADC (10 bits: 0 - 1023) CON TOLERANCIA ABSOLUTA DE +/- 0.12 V
+// ============================================================================
 typedef struct {
     uint16_t min;
     uint16_t max;
 } RangoADC;
 
 const RangoADC rangos_botones[12] = {
-    {  1,  41}, // PB1  -> Digito 1
-    { 86,  96}, // PB2  -> Digito 2
-    {171, 189}, // PB3  -> Digito 3
-    {241, 267}, // PB4  -> Digito 4
-    {308, 340}, // PB5  -> Digito 5
-    {348, 384}, // PB6  -> Digito 6
-    {401, 443}, // PB7  -> Digito 7
-    {434, 480}, // PB8  -> Digito 8
-    {527, 583}, // PB9  -> Digito 9
-    {624, 690}, // PB10 -> Digito 0
-    {708, 782}, // PB11 -> Borrar entrada actual
-    {803, 887}  // PB12
+    {  0,  35}, // PB1  -> Digito 1
+    { 66, 115}, // PB2  -> Digito 2
+    {155, 204}, // PB3  -> Digito 3
+    {229, 278}, // PB4  -> Digito 4
+    {299, 348}, // PB5  -> Digito 5
+    {341, 390}, // PB6  -> Digito 6
+    {397, 446}, // PB7  -> Digito 7
+    {432, 481}, // PB8  -> Digito 8
+    {530, 580}, // PB9  -> Digito 9
+    {632, 681}, // PB10 -> Digito 0
+    {720, 769}, // PB11 -> Borrar entrada actual
+    {820, 869}  // PB12
 };
 
 // ============================================================================
-// MELODÍA DE CELEBRACIÓN (BUZZER EN RC1 / CCP2)
+// MELODÍAS (BUZZER EN RC1 / CCP2)
 // ============================================================================
+const uint16_t melody[] = {
+    659, 784, 1047, 784,
+    880, 1047, 1175, 1047,
+    1319, 1175, 1047, 784,
+    880, 784, 659, 523
+};
+
+const uint16_t duration[] = {
+    150, 150, 300, 150,
+    150, 150, 300, 300,
+    150, 150, 300, 150,
+    150, 150, 300, 450
+};
+
+#define NUMBER_NOTES (sizeof(melody) / sizeof(melody[0]))
+
 const uint16_t melodia_transicion[] = {
     659, 784, 1047, 1175, 1319
 };
@@ -114,6 +136,11 @@ void lcd_texto(const char *str) {
     while (*str) {
         lcd_dato(*str++);
     }
+}
+
+void lcd_etiqueta_j2(void) {
+    lcd_comando(0x80);
+    lcd_texto("J2 ");
 }
 
 void lcd_numero(uint16_t numero) {
@@ -215,6 +242,17 @@ void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
     }
 }
 
+void enviar_sr3(uint8_t datos) {
+    for (int8_t bit = 7; bit >= 0; bit--) {
+        SR3_DATA = (uint8_t)((datos >> bit) & 0x01);
+        __delay_us(2);
+        SR3_CLK = 1;
+        __delay_us(2);
+        SR3_CLK = 0;
+        __delay_us(2);
+    }
+}
+
 void actualizar_leds_nodos_1_a_10(uint8_t nodo_activo) {
     uint8_t dato_sr1 = 0x00;
     uint8_t dato_sr2 = 0x00;
@@ -290,6 +328,19 @@ void sonido_delay_ms(uint16_t ms) {
     }
 }
 
+void play_completion_melody(void) {
+    stop_note();
+
+    for (uint8_t i = 0; i < NUMBER_NOTES; i++) {
+        play_note(melody[i]);
+        sonido_delay_ms(duration[i]);
+        stop_note();
+        __delay_ms(40);
+    }
+
+    stop_note();
+}
+
 void play_transition_celebration(void) {
     stop_note();
 
@@ -308,6 +359,30 @@ void play_error_tone(void) {
     play_note(220);
     sonido_delay_ms(180);
     stop_note();
+}
+
+// ============================================================================
+// BARRA DE PROGRESO / RACHA EN SR3 (Q0..Q3, APAGANDO ANTERIORES)
+// ============================================================================
+static void mostrar_increible_lcd(void) {
+    lcd_comando(0x01);
+    lcd_etiqueta_j2();
+    lcd_texto("Increible    ");
+}
+
+static void actualizar_racha_sr3(uint8_t *racha_sr3) {
+    (*racha_sr3)++;
+
+    if (*racha_sr3 >= RACHA_OBJETIVO_SR3) {
+        enviar_sr3((uint8_t)(1U << 3)); // Q3 encendido al llegar a 4
+        mostrar_increible_lcd();
+        play_completion_melody();
+        *racha_sr3 = 0;
+        enviar_sr3(0x00); // Q0..Q3 en bajo
+    } else {
+        // Solo el LED actual encendido (apaga los anteriores en la barra)
+        enviar_sr3((uint8_t)(1U << (*racha_sr3 - 1)));
+    }
 }
 
 // ============================================================================
@@ -414,13 +489,13 @@ static uint8_t contar_digitos(uint16_t val) {
 }
 
 static void mostrar_problema_y_entrada(const ProblemaMate *prob, uint16_t entrada_actual, uint8_t digitos_ingresados) {
-    lcd_comando(0x80);
+    lcd_etiqueta_j2();
     lcd_numero(prob->a);
     lcd_dato(' ');
     lcd_dato((unsigned char)prob->simbolo);
     lcd_dato(' ');
     lcd_numero(prob->b);
-    lcd_texto(" = ?          ");
+    lcd_texto(" = ?       ");
 
     lcd_comando(0xC0);
     lcd_texto("Resp: ");
@@ -453,11 +528,17 @@ void main(void) {
     LATD = 0x00;
     LATC = 0x00;
 
+    TRISBbits.TRISB2 = 0;
+    TRISBbits.TRISB3 = 0;
     TRISBbits.TRISB4 = 0;
     TRISBbits.TRISB5 = 0;
     TRISBbits.TRISB6 = 0;
     TRISBbits.TRISB7 = 0;
+    SR3_DATA = 0;
+    SR3_CLK = 0;
     LATB &= 0x0F;
+
+    CCP2CON = 0x00;
 
     T0CON = 0xC8;
     TMR0L = 0;
@@ -466,6 +547,8 @@ void main(void) {
     adc_iniciar();
     sonido_iniciar();
     actualizar_leds_nodos_1_a_10(0);
+    uint8_t racha_sr3 = 0;
+    enviar_sr3(0x00);
 
     SystemState estado_btn = STATE_IDLE;
     uint8_t boton_cand = 0;
@@ -486,6 +569,9 @@ void main(void) {
         unsigned int lectura_adc = adc_leer_canal(0);
 
         switch (estado_btn) {
+            // ----------------------------------------------------------------
+            // 1. IDLE: Espera pulsación mientras el pin marca ~5 V
+            // ----------------------------------------------------------------
             case STATE_IDLE:
                 if (lectura_adc < UMBRAL_REPOSO_5V) {
                     cnt_tiempo = 0;
@@ -493,6 +579,10 @@ void main(void) {
                 }
                 break;
 
+            // ----------------------------------------------------------------
+            // 2. DETECTION: Espera 20 ms a que el capacitor de 100 nF estabilice
+            //    y captura el botón candidato
+            // ----------------------------------------------------------------
             case STATE_DETECTION:
                 cnt_tiempo++;
                 if (cnt_tiempo >= (TIEMPO_CAP_MS / TICK_MS)) {
@@ -510,6 +600,10 @@ void main(void) {
                 }
                 break;
 
+            // ----------------------------------------------------------------
+            // 3. VALIDATION: Comprueba que el mismo botón se mantenga
+            //    estable durante 40 ms (8 muestras * 5 ms)
+            // ----------------------------------------------------------------
             case STATE_VALIDATION:
                 if (identificar_boton(lectura_adc) == boton_cand) {
                     cnt_tiempo++;
@@ -526,6 +620,10 @@ void main(void) {
                 }
                 break;
 
+            // ----------------------------------------------------------------
+            // 4. LOCK: Ignora cualquier otro valor hasta confirmar que el ADC
+            //    regresó de forma estable a ~5 V (20 ms continuos)
+            // ----------------------------------------------------------------
             case STATE_LOCK:
                 if (lectura_adc >= UMBRAL_REPOSO_5V) {
                     cnt_tiempo++;
@@ -550,14 +648,15 @@ void main(void) {
                             if (digitos_contados >= digitos_necesarios) {
                                 if (entrada_usuario == prob_actual.resultado) {
                                     lcd_comando(0x01);
-                                    lcd_comando(0x80);
-                                    lcd_texto("Correcto!       ");
+                                    lcd_etiqueta_j2();
+                                    lcd_texto("Correcto!    ");
                                     lcd_comando(0xC0);
                                     lcd_texto("Resp: ");
                                     lcd_numero(prob_actual.resultado);
                                     lcd_texto("        ");
 
                                     play_transition_celebration();
+                                    actualizar_racha_sr3(&racha_sr3);
                                     __delay_ms(1200);
 
                                     ronda++;
@@ -569,9 +668,12 @@ void main(void) {
                                     lcd_comando(0x01);
                                     mostrar_problema_y_entrada(&prob_actual, entrada_usuario, digitos_contados);
                                 } else {
+                                    racha_sr3 = 0;
+                                    enviar_sr3(0x00);
+
                                     lcd_comando(0x01);
-                                    lcd_comando(0x80);
-                                    lcd_texto("Incorrecto      ");
+                                    lcd_etiqueta_j2();
+                                    lcd_texto("Incorrecto   ");
                                     lcd_comando(0xC0);
                                     lcd_texto("Intenta de nuevo");
 
