@@ -31,9 +31,11 @@
 #define SR1_CLK   LATBbits.LATB5  // Pin 38 -> CLK Shift Register 1
 #define SR2_DATA  LATBbits.LATB6  // Pin 39 -> AB Shift Register 2 (Q0..Q5: LEDs 7-12)
 #define SR2_CLK   LATBbits.LATB7  // Pin 40 -> CLK Shift Register 2
+#define SR3_DATA  LATBbits.LATB2  // RB2 -> A del 74164 (datos barra de racha)
+#define SR3_CLK   LATBbits.LATB3  // RB3 -> CLK del 74164 (reloj barra de racha)
 
 // ============================================================================
-// PARÁMETROS DE LA FSM DE BOTONES (AN0)
+// PARÁMETROS DE LA FSM DE BOTONES (AN0) Y RACHA SR3
 // ============================================================================
 typedef enum {
     STATE_IDLE = 0,
@@ -47,30 +49,50 @@ typedef enum {
 #define TIEMPO_CAP_MS       20    // Estabilización capacitor 100 nF
 #define MUESTRAS_VALIDACION 8     // 40 ms validación continua
 #define MUESTRAS_LIBERACION 4     // 20 ms estables en 5V para desbloquear
+#define RACHA_OBJETIVO_SR3  4     // 4 aciertos completos -> "Increible" + reinicio
 
+// ============================================================================
+// RANGOS ADC (10 bits: 0 - 1023) CON TOLERANCIA ABSOLUTA DE +/- 0.12 V
+// ============================================================================
 typedef struct {
     uint16_t min;
     uint16_t max;
 } RangoADC;
 
 const RangoADC rangos_botones[12] = {
-    {  1,  41}, // PB1
-    { 86,  96}, // PB2
-    {171, 189}, // PB3
-    {241, 267}, // PB4 -> Opción A
-    {308, 340}, // PB5 -> Opción B
-    {348, 384}, // PB6 -> Opción C
-    {401, 443}, // PB7
-    {434, 480}, // PB8
-    {527, 583}, // PB9
-    {624, 690}, // PB10
-    {708, 782}, // PB11
-    {803, 887}  // PB12
+    {  0,  35}, // PB1:  0V hasta ~0.17V
+    { 66, 115}, // PB2:  0.444V +/- 0.12V
+    {155, 204}, // PB3:  0.879V +/- 0.12V
+    {229, 278}, // PB4 -> Opción A: 1.239V +/- 0.12V
+    {299, 348}, // PB5 -> Opción B: 1.583V +/- 0.12V
+    {341, 390}, // PB6 -> Opción C: 1.787V +/- 0.12V
+    {397, 446}, // PB7:  2.059V +/- 0.12V
+    {432, 481}, // PB8:  2.233V +/- 0.12V
+    {530, 580}, // PB9:  2.712V +/- 0.12V
+    {632, 681}, // PB10: 3.208V +/- 0.12V
+    {720, 769}, // PB11: 3.640V +/- 0.12V
+    {820, 869}  // PB12: 4.127V +/- 0.12V
 };
 
 // ============================================================================
-// MELODÍA DE CELEBRACIÓN (BUZZER EN RC1 / CCP2)
+// MELODÍAS (BUZZER EN RC1 / CCP2)
 // ============================================================================
+const uint16_t melody[] = {
+    659, 784, 1047, 784,
+    880, 1047, 1175, 1047,
+    1319, 1175, 1047, 784,
+    880, 784, 659, 523
+};
+
+const uint16_t duration[] = {
+    150, 150, 300, 150,
+    150, 150, 300, 300,
+    150, 150, 300, 150,
+    150, 150, 300, 450
+};
+
+#define NUMBER_NOTES (sizeof(melody) / sizeof(melody[0]))
+
 const uint16_t melodia_transicion[] = {
     659, 784, 1047, 1175, 1319
 };
@@ -254,6 +276,17 @@ void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
     }
 }
 
+void enviar_sr3(uint8_t datos) {
+    for (int8_t bit = 7; bit >= 0; bit--) {
+        SR3_DATA = (uint8_t)((datos >> bit) & 0x01);
+        __delay_us(2);
+        SR3_CLK = 1;
+        __delay_us(2);
+        SR3_CLK = 0;
+        __delay_us(2);
+    }
+}
+
 // Enciende LEDs específicos de la cuadrícula 3x3 (Bit 0 = LED1 ... Bit 8 = LED9)
 void actualizar_tablero_leds(uint16_t mascara_leds) {
     uint8_t dato_sr1 = (uint8_t)(mascara_leds & 0x3F);         // LEDs 1..6 (Q0..Q5 SR1)
@@ -323,6 +356,19 @@ void sonido_delay_ms(uint16_t ms) {
     }
 }
 
+void play_completion_melody(void) {
+    stop_note();
+
+    for (uint8_t i = 0; i < NUMBER_NOTES; i++) {
+        play_note(melody[i]);
+        sonido_delay_ms(duration[i]);
+        stop_note();
+        __delay_ms(40);
+    }
+
+    stop_note();
+}
+
 void play_transition_celebration(void) {
     stop_note();
 
@@ -344,7 +390,31 @@ void play_error_tone(void) {
 }
 
 // ============================================================================
-// PANTALLAS Y LÓGICA DE TRIVIA MINECRAFT
+// BARRA DE PROGRESO / RACHA EN SR3 (Q0..Q3, APAGANDO ANTERIORES)
+// ============================================================================
+static void mostrar_increible_lcd(void) {
+    lcd_comando(0x01);
+    lcd_comando(0x80);
+    lcd_texto("J3 Increible    ");
+}
+
+static void actualizar_racha_sr3(uint8_t *racha_sr3) {
+    (*racha_sr3)++;
+
+    if (*racha_sr3 >= RACHA_OBJETIVO_SR3) {
+        enviar_sr3((uint8_t)(1U << 3)); // Q3 encendido al llegar a 4
+        mostrar_increible_lcd();
+        play_completion_melody();
+        *racha_sr3 = 0;
+        enviar_sr3(0x00); // Q0..Q3 en bajo
+    } else {
+        // Solo el LED actual encendido (apaga los anteriores en la barra)
+        enviar_sr3((uint8_t)(1U << (*racha_sr3 - 1)));
+    }
+}
+
+// ============================================================================
+// PANTALLAS Y LÓGICA DE TRIVIA MINECRAFT (J3)
 // ============================================================================
 // En el layout invertido del tablero:
 //   [7] [8] [9] -> Arriba
@@ -367,9 +437,9 @@ void pantalla_inicio_trivia(void) {
     lcd_comando(0x01);
     __delay_ms(1500);
 
-    // Línea 1 fija: "HORA DE TRIVIA" | Línea 2: Countdown 3, 2, 1, COMIENZA!
+    // Línea 1 fija: "J3 HORA DE TRIVIA" | Línea 2: Countdown 3, 2, 1, COMIENZA!
     lcd_comando(0x80);
-    lcd_texto(" HORA DE TRIVIA ");
+    lcd_texto("J3 HORA TRIVIA  ");
 
     for (uint8_t i = 0; i < 4; i++) {
         lcd_comando(0xC0);
@@ -385,10 +455,10 @@ void mostrar_pregunta_y_opciones(uint8_t idx) {
     // 1. Mostrar la pregunta completa (con desplazamiento si excede 16 caracteres)
     lcd_comando(0x01);
     lcd_comando(0x80);
-    lcd_texto("Pregunta ");
+    lcd_texto("J3 Preg ");
     lcd_dato('0' + (unsigned char)((idx + 1) / 10));
     lcd_dato('0' + (unsigned char)((idx + 1) % 10));
-    lcd_texto("/30:");
+    lcd_texto("/30:   ");
 
     lcd_comando(0xC0);
     lcd_texto_limitado(preg, 16);
@@ -422,7 +492,9 @@ void ejecutar_rutina_trivia(void) {
     uint8_t boton_cand = 0;
     uint8_t cnt_tiempo = 0;
     uint8_t pregunta_idx = 0;
+    uint8_t racha_sr3 = 0;
 
+    enviar_sr3(0x00);
     pantalla_inicio_trivia();
 
     // Encender LEDs 4, 5 y 6 como indicadores de A, B y C
@@ -486,14 +558,15 @@ void ejecutar_rutina_trivia(void) {
                         // Ignorar cualquier botón distinto de 4, 5 o 6
                         if (seleccion >= 4 && seleccion <= 6) {
                             if (seleccion == banco_trivia[pregunta_idx].boton_correcto) {
-                                // Respuesta correcta -> Mensaje + Melodía CCP2
+                                // Respuesta correcta -> Mensaje + Melodía CCP2 + Barra SR3
                                 lcd_comando(0x01);
                                 lcd_comando(0x80);
-                                lcd_texto("Correcto! Muy   ");
+                                lcd_texto("J3 Correcto!    ");
                                 lcd_comando(0xC0);
-                                lcd_texto("Bien! Sigue Asi ");
+                                lcd_texto("Muy Bien!       ");
 
                                 play_transition_celebration();
+                                actualizar_racha_sr3(&racha_sr3);
                                 __delay_ms(1800);
 
                                 pregunta_idx++;
@@ -502,10 +575,13 @@ void ejecutar_rutina_trivia(void) {
                                     mostrar_pregunta_y_opciones(pregunta_idx);
                                 }
                             } else {
-                                // Respuesta incorrecta -> Tono grave y reintentar misma pregunta
+                                // Respuesta incorrecta -> Tono grave, reinicia racha SR3 y reintentar
+                                racha_sr3 = 0;
+                                enviar_sr3(0x00);
+
                                 lcd_comando(0x01);
                                 lcd_comando(0x80);
-                                lcd_texto("Ups! Intenta    ");
+                                lcd_texto("J3 Ups! Intenta ");
                                 lcd_comando(0xC0);
                                 lcd_texto("de nuevo...     ");
 
@@ -527,10 +603,12 @@ void ejecutar_rutina_trivia(void) {
     }
 
     // Finalización de las 30 preguntas
+    racha_sr3 = 0;
+    enviar_sr3(0x00);
     actualizar_tablero_leds(0x0000);
     lcd_comando(0x01);
     lcd_comando(0x80);
-    lcd_texto("Felicidades,    ");
+    lcd_texto("J3 Felicidades ");
     lcd_comando(0xC0);
     lcd_texto("haz acabado     ");
     __delay_ms(10000);
@@ -557,17 +635,22 @@ void main(void) {
     LATD = 0x00;
     LATC = 0x00;
 
-    // Pines de los Shift Registers (Pines 37-40 -> RB4-RB7)
+    // Pines de los Shift Registers (SR3: RB2-RB3; SR1/SR2: RB4-RB7)
+    TRISBbits.TRISB2 = 0;
+    TRISBbits.TRISB3 = 0;
     TRISBbits.TRISB4 = 0;
     TRISBbits.TRISB5 = 0;
     TRISBbits.TRISB6 = 0;
     TRISBbits.TRISB7 = 0;
+    SR3_DATA = 0;
+    SR3_CLK = 0;
     LATB &= 0x0F;
 
     lcd_iniciar();
     adc_iniciar();
     sonido_iniciar();
     actualizar_tablero_leds(0x0000);
+    enviar_sr3(0x00);
 
     while (1) {
         ejecutar_rutina_trivia();
