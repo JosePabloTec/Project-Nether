@@ -211,17 +211,17 @@ void lcd_iniciar(void) {
 
 void lcd_mostrar_puntaje(uint16_t puntaje) {
     lcd_comando(0x80);
-    lcd_texto("Puntaje: ");
+    lcd_texto("J5 Puntaje: ");
     lcd_numero(puntaje);
-    lcd_texto("       ");
+    lcd_texto("    ");
 }
 
 void lcd_linea2_mensaje(uint8_t mostrar_animo) {
     lcd_comando(0xC0);
     if (mostrar_animo) {
-        lcd_texto("Sigue asi!      ");
+        lcd_texto("J5 Sigue asi!   ");
     } else {
-        lcd_texto("                ");
+        lcd_texto("J5              ");
     }
 }
 
@@ -414,11 +414,11 @@ void play_transition_celebration(void) {
 static void mostrar_increible_lcd(uint16_t puntaje) {
     lcd_comando(0x01);
     lcd_comando(0x80);
-    lcd_texto("Increible       ");
+    lcd_texto("J5 Increible    ");
     lcd_comando(0xC0);
-    lcd_texto("Puntaje: ");
+    lcd_texto("J5 Puntaje: ");
     lcd_numero(puntaje);
-    lcd_texto("       ");
+    lcd_texto("    ");
 }
 
 static void actualizar_racha_sr3(uint8_t *racha_sr3, uint16_t *puntaje) {
