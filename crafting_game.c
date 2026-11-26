@@ -138,6 +138,11 @@ void lcd_texto(const char *str) {
     }
 }
 
+void lcd_etiqueta_j4(void) {
+    lcd_comando(0x80);
+    lcd_texto("J4 ");
+}
+
 void lcd_iniciar(void) {
     __delay_ms(50);
     lcd_comando(0x30);
@@ -344,8 +349,8 @@ void play_transition_celebration(void) {
 // ============================================================================
 static void mostrar_increible_lcd(void) {
     lcd_comando(0x01);
-    lcd_comando(0x80);
-    lcd_texto("Increible       ");
+    lcd_etiqueta_j4();
+    lcd_texto("Increible    ");
 }
 
 static void actualizar_racha_sr3(uint8_t *racha_sr3) {
@@ -406,18 +411,19 @@ void actualizar_tablero_crafting(uint16_t estado_leds) {
 
 void mostrar_receta_actual(uint8_t indice) {
     lcd_comando(0x01);
-    lcd_comando(0x80);
-    lcd_texto("Craftea:");
+    lcd_etiqueta_j4();
+    lcd_texto("Craftea:     ");
     lcd_comando(0xC0);
+    lcd_texto("J4 ");
     lcd_texto(recetas_crafting[indice].nombre);
 }
 
 void secuencia_cuenta_regresiva(void) {
-    const char *pasos[4] = { "       3        ", "       2        ",
-                             "       1        ", "   COMIENZA!    " };
+    const char *pasos[4] = { "3            ", "2            ",
+                             "1            ", "COMIENZA!    " };
     for (uint8_t i = 0; i < 4; i++) {
         lcd_comando(0x01);
-        lcd_comando(0x80);
+        lcd_etiqueta_j4();
         lcd_texto(pasos[i]);
         __delay_ms(1000);
     }
@@ -437,6 +443,7 @@ void ejecutar_rutina_crafting(void) {
     actualizar_tablero_crafting(0x0000);
     enviar_sr3(0x00);
     lcd_comando(0x01);
+    lcd_etiqueta_j4();
     __delay_ms(2000);
     secuencia_cuenta_regresiva();
 
@@ -499,10 +506,10 @@ void ejecutar_rutina_crafting(void) {
                         // Validar receta sin importar el orden de pulsación; si no coincide, esperar
                         if (tablero_leds == recetas_crafting[receta_idx].mascara_leds) {
                             lcd_comando(0x01);
-                            lcd_comando(0x80);
-                            lcd_texto("Correcto! Muy   ");
+                            lcd_etiqueta_j4();
+                            lcd_texto("Correcto!    ");
                             lcd_comando(0xC0);
-                            lcd_texto("Bien! Sigue Asi ");
+                            lcd_texto("J4 Muy Bien! ");
 
                             // Reproducir melodía de celebración y actualizar barra de racha SR3
                             play_transition_celebration();
