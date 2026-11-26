@@ -30,6 +30,8 @@
 #define SR1_CLK   LATBbits.LATB5  // Pin 38 -> CLK Shift Register 1
 #define SR2_DATA  LATBbits.LATB6  // Pin 39 -> AB Shift Register 2 (Q0..Q5: LEDs 7-12, Q6: Pot3, Q7: Pot4)
 #define SR2_CLK   LATBbits.LATB7  // Pin 40 -> CLK Shift Register 2
+#define SR3_DATA  LATBbits.LATB2  // RB2 -> A del 74164 (datos barra de racha)
+#define SR3_CLK   LATBbits.LATB3  // RB3 -> CLK del 74164 (reloj barra de racha)
 
 // ============================================================================
 // DEFINICIÓN DE ESTADOS DE LA FSM Y PARÁMETROS TEMPORALES (BOTONES EN AN0)
@@ -46,9 +48,10 @@ typedef enum {
 #define TIEMPO_CAP_MS       20    // Espera para estabilizar capacitor de 100 nF
 #define MUESTRAS_VALIDACION 8     // 8 * 5ms = 40 ms de validación continua (rango 30-50 ms)
 #define MUESTRAS_LIBERACION 4     // 4 * 5ms = 20 ms estables en 5V para desbloquear
+#define RACHA_OBJETIVO_SR3  4     // 4 recetas completadas -> "Increible" + reinicio
 
 // ============================================================================
-// RANGOS ADC (10 bits: 0 - 1023) CON TOLERANCIA DE +/- 5%
+// RANGOS ADC (10 bits: 0 - 1023) CON TOLERANCIA ABSOLUTA DE +/- 0.12 V
 // ============================================================================
 typedef struct {
     uint16_t min;
@@ -56,23 +59,39 @@ typedef struct {
 } RangoADC;
 
 const RangoADC rangos_botones[12] = {
-    {  1,  41}, // PB1:  > 0V y < 0.20V (aprox 35mV nominal)
-    { 86,  96}, // PB2:  0.444V +/- 5%  (91 cuentas)
-    {171, 189}, // PB3:  0.879V +/- 5%  (180 cuentas)
-    {241, 267}, // PB4:  1.239V +/- 5%  (254 cuentas)
-    {308, 340}, // PB5:  1.583V +/- 5%  (324 cuentas - 4.632k)
-    {348, 384}, // PB6:  1.787V +/- 5%  (366 cuentas)
-    {401, 443}, // PB7:  2.059V +/- 5%  (422 cuentas)
-    {434, 480}, // PB8:  2.233V +/- 5%  (457 cuentas)
-    {527, 583}, // PB9:  2.712V +/- 5%  (555 cuentas)
-    {624, 690}, // PB10: 3.208V +/- 5%  (657 cuentas)
-    {708, 782}, // PB11: 3.640V +/- 5%  (745 cuentas)
-    {803, 887}  // PB12: 4.127V +/- 5%  (845 cuentas)
+    {  0,  35}, // PB1:  0V hasta ~0.17V (incluye 150 mV / ~31 cuentas)
+    { 66, 115}, // PB2:  0.444V +/- 0.12V (0.324V - 0.564V)
+    {155, 204}, // PB3:  0.879V +/- 0.12V (0.759V - 0.999V)
+    {229, 278}, // PB4:  1.239V +/- 0.12V (1.119V - 1.359V)
+    {299, 348}, // PB5:  1.583V +/- 0.12V (1.463V - 1.703V)
+    {341, 390}, // PB6:  1.787V +/- 0.12V (1.667V - 1.907V)
+    {397, 446}, // PB7:  2.059V +/- 0.12V (1.939V - 2.179V)
+    {432, 481}, // PB8:  2.233V +/- 0.12V (2.113V - 2.353V)
+    {530, 580}, // PB9:  2.712V +/- 0.12V (2.592V - 2.832V)
+    {632, 681}, // PB10: 3.208V +/- 0.12V (3.088V - 3.328V)
+    {720, 769}, // PB11: 3.640V +/- 0.12V (3.520V - 3.760V)
+    {820, 869}  // PB12: 4.127V +/- 0.12V (4.007V - 4.247V)
 };
 
 // ============================================================================
-// MELODÍA CORTA DE CELEBRACIÓN POR RECETA COMPLETADA (BUZZER EN RC1 / CCP2)
+// MELODÍAS (BUZZER EN RC1 / CCP2)
 // ============================================================================
+const uint16_t melody[] = {
+    659, 784, 1047, 784,
+    880, 1047, 1175, 1047,
+    1319, 1175, 1047, 784,
+    880, 784, 659, 523
+};
+
+const uint16_t duration[] = {
+    150, 150, 300, 150,
+    150, 150, 300, 300,
+    150, 150, 300, 150,
+    150, 150, 300, 450
+};
+
+#define NUMBER_NOTES (sizeof(melody) / sizeof(melody[0]))
+
 const uint16_t melodia_transicion[] = {
     659, 784, 1047, 1175, 1319
 };
@@ -200,6 +219,17 @@ void enviar_shift_register(uint8_t sr_num, uint8_t datos) {
     }
 }
 
+void enviar_sr3(uint8_t datos) {
+    for (int8_t bit = 7; bit >= 0; bit--) {
+        SR3_DATA = (uint8_t)((datos >> bit) & 0x01);
+        __delay_us(2);
+        SR3_CLK = 1;
+        __delay_us(2);
+        SR3_CLK = 0;
+        __delay_us(2);
+    }
+}
+
 void actualizar_salidas(uint8_t boton, uint8_t pot1_activo, uint8_t pot2_activo,
                         uint8_t pot3_activo, uint8_t pot4_activo) {
     uint8_t dato_sr1 = 0x00;
@@ -283,6 +313,19 @@ void sonido_delay_ms(uint16_t ms) {
     }
 }
 
+void play_completion_melody(void) {
+    stop_note();
+
+    for (uint8_t i = 0; i < NUMBER_NOTES; i++) {
+        play_note(melody[i]);
+        sonido_delay_ms(duration[i]);
+        stop_note();
+        __delay_ms(40);
+    }
+
+    stop_note();
+}
+
 void play_transition_celebration(void) {
     stop_note();
 
@@ -294,6 +337,30 @@ void play_transition_celebration(void) {
     }
 
     stop_note();
+}
+
+// ============================================================================
+// BARRA DE PROGRESO / RACHA EN SR3 (Q0..Q3, APAGANDO ANTERIORES)
+// ============================================================================
+static void mostrar_increible_lcd(void) {
+    lcd_comando(0x01);
+    lcd_comando(0x80);
+    lcd_texto("Increible       ");
+}
+
+static void actualizar_racha_sr3(uint8_t *racha_sr3) {
+    (*racha_sr3)++;
+
+    if (*racha_sr3 >= RACHA_OBJETIVO_SR3) {
+        enviar_sr3((uint8_t)(1U << 3)); // Q3 encendido al llegar a 4
+        mostrar_increible_lcd();
+        play_completion_melody();
+        *racha_sr3 = 0;
+        enviar_sr3(0x00); // Q0..Q3 en bajo
+    } else {
+        // Solo el LED actual encendido (apaga los anteriores en la barra)
+        enviar_sr3((uint8_t)(1U << (*racha_sr3 - 1)));
+    }
 }
 
 // ============================================================================
@@ -364,9 +431,11 @@ void ejecutar_rutina_crafting(void) {
 
     uint8_t receta_idx = 0;
     uint16_t tablero_leds = 0x0000;
+    uint8_t racha_sr3 = 0;
 
     // 1. Limpiar tablero, esperar 2 segundos al encender y correr cuenta regresiva
     actualizar_tablero_crafting(0x0000);
+    enviar_sr3(0x00);
     lcd_comando(0x01);
     __delay_ms(2000);
     secuencia_cuenta_regresiva();
@@ -374,7 +443,7 @@ void ejecutar_rutina_crafting(void) {
     // 2. Mostrar primera receta
     mostrar_receta_actual(receta_idx);
 
-    while (receta_idx < TOTAL_RECETAS) {
+    while (1) {
         unsigned int lectura_adc = adc_leer_canal(0);
 
         switch (estado_btn) {
@@ -427,7 +496,7 @@ void ejecutar_rutina_crafting(void) {
                         boton_cand = 0;
                         estado_btn = STATE_IDLE;
 
-                        // Validar receta sin importar el orden de pulsación
+                        // Validar receta sin importar el orden de pulsación; si no coincide, esperar
                         if (tablero_leds == recetas_crafting[receta_idx].mascara_leds) {
                             lcd_comando(0x01);
                             lcd_comando(0x80);
@@ -435,18 +504,20 @@ void ejecutar_rutina_crafting(void) {
                             lcd_comando(0xC0);
                             lcd_texto("Bien! Sigue Asi ");
 
-                            // Reproducir melodía de celebración en buzzer (RC1 / CCP2)
+                            // Reproducir melodía de celebración y actualizar barra de racha SR3
                             play_transition_celebration();
+                            actualizar_racha_sr3(&racha_sr3);
                             __delay_ms(2000);
 
-                            // Limpiar tablero para la siguiente receta
+                            // Limpiar tablero y avanzar; si acaba el ciclo, reiniciar sin fin
                             tablero_leds = 0x0000;
                             actualizar_tablero_crafting(tablero_leds);
                             receta_idx++;
-
-                            if (receta_idx < TOTAL_RECETAS) {
-                                mostrar_receta_actual(receta_idx);
+                            if (receta_idx >= TOTAL_RECETAS) {
+                                receta_idx = 0;
                             }
+
+                            mostrar_receta_actual(receta_idx);
                         }
                     }
                 } else {
@@ -457,15 +528,6 @@ void ejecutar_rutina_crafting(void) {
 
         __delay_ms(TICK_MS);
     }
-
-    // 3. Todas las recetas completadas -> Mensaje final por 10 segundos
-    actualizar_tablero_crafting(0x0000);
-    lcd_comando(0x01);
-    lcd_comando(0x80);
-    lcd_texto("Felicidades,    ");
-    lcd_comando(0xC0);
-    lcd_texto("haz acabado     ");
-    __delay_ms(10000);
 }
 
 // ============================================================================
@@ -490,17 +552,22 @@ void main(void) {
     LATD = 0x00;
     LATC = 0x00;
 
-    // Configurar pines de los Shift Registers (Pines 37-40 -> RB4-RB7)
+    // Configurar pines de los Shift Registers (SR3: RB2-RB3; SR1/SR2: RB4-RB7)
+    TRISBbits.TRISB2 = 0;
+    TRISBbits.TRISB3 = 0;
     TRISBbits.TRISB4 = 0;
     TRISBbits.TRISB5 = 0;
     TRISBbits.TRISB6 = 0;
     TRISBbits.TRISB7 = 0;
+    SR3_DATA = 0;
+    SR3_CLK = 0;
     LATB &= 0x0F;
 
     lcd_iniciar();
     adc_iniciar();
     sonido_iniciar();
     actualizar_salidas(0, 0, 0, 0, 0);
+    enviar_sr3(0x00);
 
     // Inicia automáticamente en cuanto se energiza el PIC
     while (1) {
